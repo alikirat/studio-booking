@@ -1,0 +1,32 @@
+# Ships the JSON logs from the three service containers into Elasticsearch.
+# Only containers labeled studio_logs=true are collected (see docker-compose.yml).
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      templates:
+        - condition:
+            equals:
+              docker.container.labels.studio_logs: "true"
+          config:
+            - type: container
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*.log
+              processors:
+                # Each line the service writes is a JSON object; expand it into
+                # fields under "app" so Kibana can filter on app.Category,
+                # app.State.ElapsedMs, app.Scopes.CorrelationId and so on.
+                - decode_json_fields:
+                    fields: ["message"]
+                    target: "app"
+                    add_error_key: true
+
+processors:
+  - add_docker_metadata: ~
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  index: "studio-logs-%{+yyyy.MM.dd}"
+
+setup.template.name: "studio-logs"
+setup.template.pattern: "studio-logs-*"
+setup.ilm.enabled: false

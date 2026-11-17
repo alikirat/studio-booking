@@ -1,0 +1,109 @@
+# Core system:          docker compose up --build
+# With Kibana logging:  docker compose --profile observability up --build
+name: studio-booking
+
+x-service-logs: &service-logs
+  labels:
+    studio_logs: "true"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: studio
+      POSTGRES_PASSWORD: studio
+    ports: ["5432:5432"]
+    volumes:
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studio"]
+      interval: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # management UI, login guest / guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      retries: 20
+
+  classes-api:
+    build: { context: ., args: { PROJECT: Classes.Api } }
+    <<: *service-logs
+    environment:
+      Storage__Provider: Postgres
+      ConnectionStrings__ClassesDb: Host=postgres;Database=classes_db;Username=studio;Password=studio
+    ports: ["8081:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  bookings-api:
+    build: { context: ., args: { PROJECT: Bookings.Api } }
+    <<: *service-logs
+    environment:
+      Storage__Provider: Postgres
+      ConnectionStrings__BookingsDb: Host=postgres;Database=bookings_db;Username=studio;Password=studio
+      Services__ClassesApi: http://classes-api:8080
+      Messaging__Provider: RabbitMq
+      RabbitMq__Host: rabbitmq
+    ports: ["8082:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      classes-api: { condition: service_started }
+
+  notifications-worker:
+    build: { context: ., args: { PROJECT: Notifications.Worker } }
+    <<: *service-logs
+    environment:
+      Messaging__Provider: RabbitMq
+      RabbitMq__Host: rabbitmq
+    ports: ["8083:8080"]
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+
+  # ---------- observability profile ----------
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    profiles: ["observability"]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"   # local demo only
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["9200:9200"]
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qv '\"status\":\"red\"'"]
+      interval: 10s
+      retries: 30
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    profiles: ["observability"]
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports: ["5601:5601"]
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.3
+    profiles: ["observability"]
+    user: root   # needs to read Docker's log files
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./deploy/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  esdata:
