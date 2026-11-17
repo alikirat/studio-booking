@@ -20,7 +20,9 @@ ARG PROJECT
 WORKDIR /app
 COPY --from=build /app .
 
+# URLS overrides the "Urls" in appsettings.json (localhost:510x, used outside Docker).
 ENV ASPNETCORE_URLS=http://+:8080 \
+    URLS=http://+:8080 \
     Logging__Format=json \
     APP_DLL=${PROJECT}.dll
 EXPOSE 8080
